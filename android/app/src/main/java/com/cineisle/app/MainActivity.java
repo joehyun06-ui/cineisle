@@ -1543,7 +1543,7 @@ public class MainActivity extends Activity {
                 body.put("partner", invitePartner);
                 body.put("mood", inviteMood);
                 body.put("inviteNote", inviteNote);
-                JSONObject res = postJson("/api/rooms", body, false);
+                JSONObject res = postJson("/api/rooms", body, true);
                 JSONObject room = res.getJSONObject("room");
                 runOnUiThread(() -> joinRoom(room.optString("id")));
             } catch (Exception e) { runOnUiThread(() -> toast("创建失败：" + e.getMessage())); }
@@ -2368,6 +2368,10 @@ public class MainActivity extends Activity {
         c.setRequestMethod("GET");
         c.setConnectTimeout(10000);
         c.setReadTimeout(10000);
+        if (token.length() > 0) {
+            c.setRequestProperty("Authorization", "Bearer " + token);
+            c.setRequestProperty("X-CineIsle-Token", token);
+        }
         String s = read(c);
         return new JSONObject(s);
     }

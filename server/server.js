@@ -5,29 +5,39 @@ const fs = require("fs");
 const path = require("path");
 const app = express();
 const PORT = process.env.PORT || 8787;
+const HOST = process.env.CINEISLE_HOST || "127.0.0.1";
 const TOKEN = process.env.CINEISLE_TOKEN || process.env.LINJIAN_CINEMA_TOKEN || "";
-const APP_VERSION = "0.4.7-mcp-playback-command-fix";
+const APP_VERSION = "0.4.7-vps-safety.1";
+
+if (TOKEN.length < 32) {
+  console.error("[CineIsle] Set CINEISLE_TOKEN to at least 32 characters before starting.");
+  process.exit(1);
+}
 
 app.use(cors());
 app.use(express.json({ limit: "6mb" }));
-app.use(express.static("public"));
+app.use(express.static(path.join(__dirname, "public")));
 
 const rooms = new Map();
 const DATA_FILE = process.env.CINEISLE_DATA_FILE || process.env.LINJIAN_CINEMA_DATA_FILE || path.join(process.cwd(), "cineisle-data.json");
 let saveTimer = null;
 
 function scheduleSave() {
-  if (saveTimer) clearTimeout(saveTimer);
+  if (saveTimer) return;
   saveTimer = setTimeout(saveRooms, 250);
 }
 
 function saveRooms() {
   saveTimer = null;
   try {
-    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify({ savedAt: now(), rooms: Array.from(rooms.values()) }, null, 2));
+    fs.mkdirSync(path.dirname(DATA_FILE), { recursive: true, mode: 0o700 });
+    const temporaryFile = DATA_FILE + ".tmp";
+    fs.writeFileSync(temporaryFile, JSON.stringify({ savedAt: now(), rooms: Array.from(rooms.values()) }, null, 2), { mode: 0o600, flush: true });
+    fs.renameSync(temporaryFile, DATA_FILE);
+    return true;
   } catch (e) {
     console.warn("[CineIsle] save rooms failed:", e.message);
+    return false;
   }
 }
 
@@ -35,7 +45,8 @@ function loadRooms() {
   try {
     if (!fs.existsSync(DATA_FILE)) return;
     const data = JSON.parse(fs.readFileSync(DATA_FILE, "utf8"));
-    const list = Array.isArray(data.rooms) ? data.rooms : [];
+    if (!data || !Array.isArray(data.rooms)) throw new Error("INVALID_ROOM_DATA_FILE");
+    const list = data.rooms;
     for (const r of list) {
       if (r && r.id) rooms.set(String(r.id).toUpperCase(), {
         ...r,
@@ -48,7 +59,8 @@ function loadRooms() {
     }
     console.log(`[CineIsle] loaded ${rooms.size} room(s) from ${DATA_FILE}`);
   } catch (e) {
-    console.warn("[CineIsle] load rooms failed:", e.message);
+    console.error("[CineIsle] load rooms failed; existing data was not changed:", e.message);
+    process.exit(1);
   }
 }
 
@@ -211,7 +223,7 @@ function getTokenFromReq(req) {
 }
 
 function isAuthed(req) {
-  if (!TOKEN) return true;
+  if (!TOKEN) return false;
   return getTokenFromReq(req) === TOKEN;
 }
 
@@ -224,7 +236,7 @@ app.get("/", (req,res)=>res.sendFile(__dirname + "/public/index.html"));
 app.get("/server-info", (req,res)=>res.json({ok:true, app:"CineIsle Server", version:APP_VERSION, rooms:rooms.size, tokenRequired:Boolean(TOKEN), mcp:"/mcp", health:"/api/health", time:now()}));
 app.get("/api/health",(req,res)=>res.json({ok:true, app:"CineIsle Server", version:APP_VERSION, rooms:rooms.size, tokenRequired:Boolean(TOKEN), time:now()}));
 
-app.post("/api/rooms",(req,res)=>{
+app.post("/api/rooms", auth, (req,res)=>{
   const r = ensure(code());
   r.title = req.body.title || r.title;
   r.theme = req.body.theme || r.theme;
@@ -235,7 +247,7 @@ app.post("/api/rooms",(req,res)=>{
   r.updatedAt = now(); scheduleSave();
   res.json({ok:true, room: pub(r, req)});
 });
-app.get("/api/rooms/:id",(req,res)=>{
+app.get("/api/rooms/:id", auth, (req,res)=>{
   const r = rooms.get(String(req.params.id).toUpperCase());
   if (!r) return res.status(404).json({ok:false,error:"ROOM_NOT_FOUND"});
   res.json({ok:true, room: pub(r, req)});
@@ -901,4 +913,17 @@ app.post("/mcp", (req, res) => {
   }
 });
 
-app.listen(PORT, () => console.log(`CineIsle server: http://localhost:${PORT}`));
+const server = app.listen(PORT, HOST, () => console.log(`CineIsle server: http://${HOST}:${server.address().port}`));
+let shuttingDown = false;
+function shutdown() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  const finish = () => {
+    if (saveTimer) clearTimeout(saveTimer);
+    process.exit(saveRooms() ? 0 : 1);
+  };
+  server.close(finish);
+  setTimeout(finish, 5000).unref();
+}
+process.once("SIGTERM", shutdown);
+process.once("SIGINT", shutdown);
