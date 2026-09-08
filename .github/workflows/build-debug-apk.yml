@@ -3,12 +3,23 @@ name: Build debug APK
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
+    paths:
+      - 'android/**'
+      - '*.gradle'
+      - 'gradle.properties'
+      - '.github/workflows/build-debug-apk.yml'
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 jobs:
   build:
     name: Build debug APK
     runs-on: ubuntu-latest
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -28,8 +39,8 @@ jobs:
         with:
           gradle-version: 8.9
 
-      - name: Build debug APK
-        run: gradle :app:assembleDebug --stacktrace
+      - name: Test and build debug APK
+        run: gradle :app:testDebugUnitTest :app:assembleDebug --stacktrace
 
       - name: Upload debug APK
         uses: actions/upload-artifact@v4

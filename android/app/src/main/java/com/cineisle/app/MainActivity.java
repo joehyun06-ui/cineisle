@@ -42,8 +42,13 @@ public class MainActivity extends Activity {
     private Button navHome, navRoom, navHall, navCard, navFavorites;
     private TextView roomTitle, roomCodeView, syncState, chatLog, noteLog, cardPreview, memberState, homeStatus, homeSub, heroBadge, fullChatLog, movieLibraryList, favoritesList, inviteSummary, importState;
     private EditText serverInput, tokenInput, nameInput, assistantNameInput, roomInput, chatInput, noteInput, quoteInput, cardNoteInput, linQuoteInput, linNoteInput, inviteMovieInput, invitePartnerInput, inviteMoodInput, inviteNoteInput;
-    private Handler handler = new Handler();
+    private Handler handler = new Handler(Looper.getMainLooper());
     private boolean polling = false;
+    private boolean activityStarted = false;
+    private boolean roomFetchInFlight = false;
+    private int roomConnectionVersion = 0;
+    private TextView roomReceiveState, fullRoomReceiveState;
+    private String roomReceiveStatus = "消息接收：尚未刷新";
     private boolean applyingRemote = false;
     private boolean danmakuOn = true;
     private FrameLayout videoFrame, normalVideoFrame;
@@ -118,7 +123,7 @@ public class MainActivity extends Activity {
     private final HashSet<String> seenDanmakuKeys = new HashSet<>();
     private final Runnable poller = new Runnable() {
         @Override public void run() {
-            if (polling && roomId.length() > 0) {
+            if (polling && activityStarted && roomId.length() > 0) {
                 fetchRoom();
                 handler.postDelayed(this, 3000);
             }
@@ -129,13 +134,32 @@ public class MainActivity extends Activity {
         super.onCreate(b);
         loadPrefs();
         buildUI();
-        showPage("home");
+        showPage(roomId.length() > 0 ? "room" : "home");
+    }
+
+    @Override protected void onStart() {
+        super.onStart();
+        activityStarted = true;
+        startPolling();
+    }
+
+    @Override protected void onStop() {
+        activityStarted = false;
+        stopPolling();
+        super.onStop();
+    }
+
+    @Override protected void onDestroy() {
+        stopPolling();
+        handler.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     private void loadPrefs() {
         android.content.SharedPreferences sp = getSharedPreferences("cineisle", 0);
         serverUrl = sp.getString("serverUrl", "");
         token = sp.getString("token", "");
+        roomId = sp.getString("roomId", "").trim().toUpperCase(java.util.Locale.US);
         name = sp.getString("name", "观影人A");
         assistantName = sp.getString("assistantName", "观影助手");
         avatar = sp.getString("avatar", "🐰");
@@ -594,6 +618,7 @@ public class MainActivity extends Activity {
 
         Button save = btn("保存并应用", true);
         save.setOnClickListener(v -> {
+            roomConnectionVersion++;
             serverUrl = normalizeServer(serverInput.getText().toString());
             token = tokenInput.getText().toString().trim();
             name = nameInput.getText().toString().trim();
@@ -764,6 +789,11 @@ public class MainActivity extends Activity {
         LinearLayout chatP = panel();
         chatP.addView(tv("岛上留言与弹幕雨", 18, Typeface.BOLD));
         chatP.addView(small("聊天像留言，弹幕像漂过银幕的小纸条，都会进入本场观影时间轴。"));
+        roomReceiveState = small(roomReceiveStatus);
+        add(chatP, roomReceiveState, -1, -2, 8);
+        Button refreshMessages = btn("刷新留言", false);
+        refreshMessages.setOnClickListener(v -> refreshRoomMessages());
+        add(chatP, refreshMessages, -1, 42, 8);
         chatLog = tv("还没有聊天。第一句可以留给今晚的电影。", 13, Typeface.NORMAL);
         chatLog.setTextColor(ink());
         chatLog.setMovementMethod(new ScrollingMovementMethod());
@@ -1551,6 +1581,7 @@ public class MainActivity extends Activity {
     }
 
     private void joinRoom(String id) {
+        roomConnectionVersion++;
         roomId = id.trim().toUpperCase();
         if (roomId.length() == 0) { toast("先输入房间号"); return; }
         roomCodeView.setText("房间号 · " + roomId);
@@ -1565,10 +1596,43 @@ public class MainActivity extends Activity {
     }
 
     private void startPolling() {
-        if (!polling) {
-            polling = true;
-            handler.post(poller);
+        if (!activityStarted || roomId.length() == 0 || serverUrl.length() == 0) return;
+        polling = true;
+        handler.removeCallbacks(poller);
+        handler.post(poller);
+    }
+
+    private void stopPolling() {
+        polling = false;
+        handler.removeCallbacks(poller);
+    }
+
+    private void setRoomReceiveStatus(String status) {
+        roomReceiveStatus = status;
+        if (roomReceiveState != null) roomReceiveState.setText(status);
+        if (fullRoomReceiveState != null) fullRoomReceiveState.setText(status);
+    }
+
+    private void refreshRoomMessages() {
+        if (roomId.length() == 0) { setRoomReceiveStatus("消息接收：请先加入房间"); return; }
+        if (serverUrl.length() == 0) { setRoomReceiveStatus("消息接收：请先配置后端地址"); return; }
+        setRoomReceiveStatus(roomFetchInFlight ? "消息接收：正在等待服务器响应" : "消息接收：正在刷新…");
+        startPolling();
+    }
+
+    private String roomReceiveError(Exception error) {
+        if (error instanceof HttpStatusException) {
+            int status = ((HttpStatusException) error).status;
+            if (status == 401 || status == 403) return "消息接收失败：Token 验证失败，请检查设置（HTTP " + status + "）";
+            if (status == 404) return "消息接收失败：房间不存在，请检查房间号（HTTP 404）";
+            return "消息接收失败：HTTP " + status + "，正在重试";
         }
+        if (error instanceof java.net.SocketTimeoutException) return "消息接收失败：连接超时，正在重试";
+        if (error instanceof java.net.UnknownHostException) return "消息接收失败：无法解析后端域名，正在重试";
+        if (error instanceof javax.net.ssl.SSLException) return "消息接收失败：HTTPS 连接失败，请检查后端地址和证书";
+        if (error instanceof JSONException) return "消息接收失败：服务器返回格式不正确，请检查后端地址";
+        // Do not display exception messages: network exceptions can contain private URLs.
+        return "消息接收失败：" + error.getClass().getSimpleName() + "，正在重试";
     }
 
 
@@ -2143,19 +2207,22 @@ public class MainActivity extends Activity {
         if (text.length() == 0) return false;
         if (roomId.length() == 0) { toast("先进入房间"); return false; }
         final String out = dm ? "弹幕：" + text : text;
+        final boolean shownLocally = dm && canShowDanmaku();
         final String pendingId = "local-" + System.currentTimeMillis() + "-" + Math.abs(out.hashCode());
         pendingChats.add(new PendingChat(pendingId, name, out));
         appendChat(name, out + "（发送中…）");
-        if (dm && danmakuOn) showDanmaku(text);
+        if (shownLocally) showDanmaku(text);
         new Thread(() -> {
             try {
                 JSONObject body = new JSONObject();
                 body.put("name", name);
                 body.put("assistantName", aiName());
                 body.put("text", out);
-                postJson("/api/rooms/" + roomId + "/message", body, true);
+                JSONObject response = postJson("/api/rooms/" + roomId + "/message", body, true);
+                JSONObject delivered = response.optJSONObject("message");
                 runOnUiThread(() -> {
                     removePendingChat(pendingId);
+                    if (shownLocally && delivered != null) seenDanmakuKeys.add(danmakuKey(delivered));
                     fetchRoom();
                 });
             } catch(Exception e) {
@@ -2204,14 +2271,30 @@ public class MainActivity extends Activity {
     }
 
     private void fetchRoom() {
-        if (serverUrl.length() == 0 || roomId.length() == 0) return;
+        if (!activityStarted || roomFetchInFlight || serverUrl.length() == 0 || roomId.length() == 0) return;
+        final String requestedRoom = roomId;
+        final String requestedServer = serverUrl;
+        final String requestedToken = token;
+        final int connectionVersion = roomConnectionVersion;
+        roomFetchInFlight = true;
         new Thread(() -> {
             try {
-                JSONObject res = getJson("/api/rooms/" + roomId);
+                JSONObject res = getJson("/api/rooms/" + requestedRoom, requestedServer, requestedToken);
                 JSONObject room = res.getJSONObject("room");
-                runOnUiThread(() -> applyRoom(room));
-            } catch(Exception ignored) {}
-        }).start();
+                if (!requestedRoom.equals(room.optString("id"))) throw new JSONException("ROOM_MISMATCH");
+                runOnUiThread(() -> {
+                    roomFetchInFlight = false;
+                    if (!activityStarted || connectionVersion != roomConnectionVersion) return;
+                    applyRoom(room);
+                });
+            } catch(Exception error) {
+                runOnUiThread(() -> {
+                    roomFetchInFlight = false;
+                    if (!activityStarted || connectionVersion != roomConnectionVersion) return;
+                    setRoomReceiveStatus(roomReceiveError(error));
+                });
+            }
+        }, "cineisle-room-receive").start();
     }
 
 
@@ -2262,6 +2345,15 @@ public class MainActivity extends Activity {
     }
 
     private void applyRoom(JSONObject room) {
+        // Receiving chat must not depend on VideoView being prepared or still attached.
+        try {
+            applyRoomMessages(room);
+            String time = new java.text.SimpleDateFormat("HH:mm:ss", java.util.Locale.getDefault()).format(new Date());
+            JSONArray messages = room.optJSONArray("messages");
+            setRoomReceiveStatus("消息接收：" + time + " 已更新 · " + (messages == null ? 0 : messages.length()) + " 条");
+        } catch(Exception error) {
+            setRoomReceiveStatus("留言显示失败：" + error.getClass().getSimpleName());
+        }
         try {
             roomCodeView.setText("房间号 " + room.optString("id", roomId));
             if (room.optString("title").length() > 0 && !room.optString("title").equals("未命名影片")) {
@@ -2311,27 +2403,6 @@ public class MainActivity extends Activity {
                     if (paused && video.isPlaying()) video.pause();
                 }
             }
-            chatLog.setText("");
-            if (fullChatLog != null) fullChatLog.setText("");
-            JSONArray msgs = room.optJSONArray("messages");
-            if (msgs != null) {
-                for (int i = Math.max(0, msgs.length()-30); i < msgs.length(); i++) {
-                    JSONObject m = msgs.getJSONObject(i);
-                    String msgName = m.optString("name","观影人");
-                    String msgText = m.optString("text","");
-                    appendChat(msgName, msgText);
-
-                    if (msgText.startsWith("弹幕：") && danmakuOn) {
-                        String key = m.optString("id", "") + "|" + m.optString("at", "") + "|" + msgText;
-                        if (!seenDanmakuKeys.contains(key)) {
-                            seenDanmakuKeys.add(key);
-                            showDanmaku(msgText.replaceFirst("^弹幕：", ""));
-                        }
-                    }
-                }
-            }
-            renderPendingChats();
-            if (chatLog.getText().length() == 0) chatLog.setText("还没有聊天。第一句可以留给今晚的电影。");
             noteLog.setText("");
             JSONArray notes = room.optJSONArray("notes");
             if (notes != null) {
@@ -2350,7 +2421,36 @@ public class MainActivity extends Activity {
                 if (c.optString("template").length() > 0) cardTemplate = c.optString("template", cardTemplate);
             }
             renderCard();
-        } catch(Exception ignored) {}
+        } catch(Exception error) {
+            lastPlaybackIssue = "Room state update: " + error.getClass().getSimpleName();
+        }
+    }
+
+    private void applyRoomMessages(JSONObject room) throws JSONException {
+        chatLog.setText("");
+        if (fullChatLog != null) fullChatLog.setText("");
+        JSONArray msgs = room.optJSONArray("messages");
+        if (msgs != null) {
+            for (int i = Math.max(0, msgs.length() - 30); i < msgs.length(); i++) {
+                JSONObject message = msgs.getJSONObject(i);
+                String text = message.optString("text", "");
+                appendChat(message.optString("name", "观影人"), text);
+                if (text.startsWith("弹幕：") && canShowDanmaku() && seenDanmakuKeys.add(danmakuKey(message))) {
+                    showDanmaku(text);
+                }
+            }
+        }
+        renderPendingChats();
+        if (chatLog.getText().length() == 0) chatLog.setText("还没有聊天。第一句可以留给今晚的电影。");
+    }
+
+    private String danmakuKey(JSONObject message) {
+        return message.optString("id", "") + "|" + message.optString("at", "") + "|" + message.optString("text", "");
+    }
+
+    private boolean canShowDanmaku() {
+        return danmakuOn && activityStarted && (fullscreenDanmakuRoot != null
+                ? fullscreenDanmakuRoot.isShown() : pageRoom != null && pageRoom.isShown());
     }
 
     private URL apiUrl(String path, boolean auth) throws Exception {
@@ -2363,17 +2463,24 @@ public class MainActivity extends Activity {
         return new URL(base + p);
     }
 
-    private JSONObject getJson(String path) throws Exception {
-        HttpURLConnection c = (HttpURLConnection) apiUrl(path, false).openConnection();
-        c.setRequestMethod("GET");
-        c.setConnectTimeout(10000);
-        c.setReadTimeout(10000);
-        if (token.length() > 0) {
-            c.setRequestProperty("Authorization", "Bearer " + token);
-            c.setRequestProperty("X-CineIsle-Token", token);
+    private JSONObject getJson(String path, String requestServer, String token) throws Exception {
+        URL url = new URL(normalizeServer(requestServer) + path);
+        HttpURLConnection c = (HttpURLConnection) url.openConnection();
+        try {
+            c.setRequestMethod("GET");
+            c.setUseCaches(false);
+            c.setRequestProperty("Cache-Control", "no-cache");
+            c.setConnectTimeout(10000);
+            c.setReadTimeout(10000);
+            if (token.length() > 0) {
+                c.setRequestProperty("Authorization", "Bearer " + token);
+                c.setRequestProperty("X-CineIsle-Token", token);
+            }
+            String s = read(c);
+            return new JSONObject(s);
+        } finally {
+            c.disconnect();
         }
-        String s = read(c);
-        return new JSONObject(s);
     }
 
     private JSONObject postJson(String path, JSONObject body, boolean auth) throws Exception {
@@ -2396,10 +2503,15 @@ public class MainActivity extends Activity {
         return new JSONObject(s);
     }
 
+    private static class HttpStatusException extends IOException {
+        final int status;
+        HttpStatusException(int status, String message) { super(message); this.status = status; }
+    }
+
     private String read(HttpURLConnection c) throws Exception {
         int code = c.getResponseCode();
         InputStream raw = code >= 400 ? c.getErrorStream() : c.getInputStream();
-        if (raw == null) throw new IOException("HTTP " + code + " 无响应内容");
+        if (raw == null) throw new HttpStatusException(code, "HTTP " + code + " 无响应内容");
         BufferedReader br = new BufferedReader(new InputStreamReader(raw, "UTF-8"));
         StringBuilder sb = new StringBuilder();
         String line;
@@ -2407,7 +2519,7 @@ public class MainActivity extends Activity {
         String text = sb.toString();
         if (code >= 400) {
             lastNetworkIssue = "HTTP " + code + " " + text;
-            throw new IOException(lastNetworkIssue.length() > 180 ? lastNetworkIssue.substring(0,180) : lastNetworkIssue);
+            throw new HttpStatusException(code, lastNetworkIssue.length() > 180 ? lastNetworkIssue.substring(0,180) : lastNetworkIssue);
         }
         return text;
     }
@@ -2431,13 +2543,6 @@ public class MainActivity extends Activity {
     }
 
     private void appendChat(String who, String text) {
-        if (text != null && text.startsWith("弹幕：")) {
-            String danmakuKey = (who == null ? "" : who) + "|" + text;
-            if (seenDanmakuKeys.add(danmakuKey)) {
-                showDanmaku(text);
-            }
-        }
-
         String line = who + "： " + text;
         String old = chatLog.getText().toString();
         if (old.startsWith("还没有聊天")) old = "";
@@ -2492,7 +2597,7 @@ public class MainActivity extends Activity {
     }
 
     private void showDanmaku(String text) {
-        if (!danmakuOn) return;
+        if (!canShowDanmaku()) return;
         if (text == null) return;
 
         text = text.replaceFirst("^弹幕：", "").trim();
@@ -2739,6 +2844,12 @@ public class MainActivity extends Activity {
         drawerStatus.setBackground(round(color("#33111111"), 16));
         drawerStatus.setPadding(dp(10), dp(8), dp(10), dp(8));
         add(panel, drawerStatus, -1, -2, 8);
+        fullRoomReceiveState = small(roomReceiveStatus);
+        fullRoomReceiveState.setTextColor(color("#E5E7EB"));
+        add(panel, fullRoomReceiveState, -1, -2, 8);
+        Button refreshMessages = btn("刷新留言", false);
+        refreshMessages.setOnClickListener(v -> refreshRoomMessages());
+        add(panel, refreshMessages, -1, 40, 6);
 
         sendChat.setOnClickListener(v -> {
             if (chatInput != null) {
@@ -2817,6 +2928,7 @@ public class MainActivity extends Activity {
 
         d.setOnDismissListener(x -> {
             fullscreenDanmakuRoot = null;
+            fullRoomReceiveState = null;
             final int exitPosMs = video.getCurrentPosition();
             final boolean exitPlaying = video.isPlaying();
             try {
