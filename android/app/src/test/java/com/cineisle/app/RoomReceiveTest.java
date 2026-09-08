@@ -6,10 +6,14 @@ import static org.robolectric.Shadows.shadowOf;
 import android.os.Looper;
 import android.widget.TextView;
 import android.widget.VideoView;
-import com.sun.net.httpserver.HttpServer;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
-import java.net.InetSocketAddress;
+import java.net.InetAddress;
+import java.net.ServerSocket;
+import java.net.Socket;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.concurrent.ExecutorService;
@@ -34,7 +38,7 @@ import org.robolectric.annotation.LooperMode;
 @LooperMode(LooperMode.Mode.PAUSED)
 public class RoomReceiveTest {
     private static final String TOKEN = "unit-test-token-with-at-least-32-characters";
-    private HttpServer server;
+    private ServerSocket server;
     private ExecutorService executor;
     private ActivityController<MainActivity> controller;
     private MainActivity activity;
@@ -46,28 +50,26 @@ public class RoomReceiveTest {
     @Before public void setUp() throws Exception {
         response.set(roomResponse("initial-message"));
         executor = Executors.newCachedThreadPool();
-        server = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
-        server.setExecutor(executor);
-        server.createContext("/api/rooms/TEST42", exchange -> {
-            requests.incrementAndGet();
-            authorization.set(exchange.getRequestHeaders().getFirst("Authorization"));
-            int code = status.get();
-            byte[] body = (code == 200 ? response.get() : "{\"ok\":false,\"error\":\"CINEISLE_BAD_TOKEN\"}")
-                    .getBytes(StandardCharsets.UTF_8);
-            exchange.getResponseHeaders().add("Content-Type", "application/json; charset=utf-8");
-            exchange.sendResponseHeaders(code, body.length);
-            try (java.io.OutputStream output = exchange.getResponseBody()) { output.write(body); }
+        server = new ServerSocket(0, 10, InetAddress.getByName("127.0.0.1"));
+        executor.execute(() -> {
+            while (!server.isClosed()) {
+                try {
+                    Socket client = server.accept();
+                    executor.execute(() -> respond(client));
+                } catch (java.io.IOException closed) {
+                    break;
+                }
+            }
         });
-        server.start();
         RuntimeEnvironment.getApplication().getSharedPreferences("cineisle", 0).edit().clear()
-                .putString("serverUrl", "http://127.0.0.1:" + server.getAddress().getPort())
+                .putString("serverUrl", "http://127.0.0.1:" + server.getLocalPort())
                 .putString("token", TOKEN).putString("roomId", "TEST42")
                 .putBoolean("contextAutoSync", false).commit();
     }
 
-    @After public void tearDown() {
+    @After public void tearDown() throws Exception {
         if (controller != null) controller.pause().stop().destroy();
-        if (server != null) server.stop(0);
+        if (server != null) server.close();
         if (executor != null) executor.shutdownNow();
     }
 
@@ -116,6 +118,31 @@ public class RoomReceiveTest {
     private void launch() {
         controller = Robolectric.buildActivity(MainActivity.class).setup();
         activity = controller.get();
+    }
+
+    private void respond(Socket client) {
+        try (Socket socket = client) {
+            socket.setSoTimeout(3000);
+            BufferedReader input = new BufferedReader(new InputStreamReader(socket.getInputStream(), StandardCharsets.UTF_8));
+            String requestLine = input.readLine();
+            String header;
+            while ((header = input.readLine()) != null && !header.isEmpty()) {
+                if (header.regionMatches(true, 0, "Authorization:", 0, 14)) {
+                    authorization.set(header.substring(14).trim());
+                }
+            }
+            requests.incrementAndGet();
+            int code = "GET /api/rooms/TEST42 HTTP/1.1".equals(requestLine) ? status.get() : 404;
+            byte[] body = (code == 200 ? response.get() : "{\"ok\":false,\"error\":\"CINEISLE_BAD_TOKEN\"}")
+                    .getBytes(StandardCharsets.UTF_8);
+            OutputStream output = socket.getOutputStream();
+            output.write(("HTTP/1.1 " + code + " Test\r\nContent-Type: application/json; charset=utf-8\r\n"
+                    + "Content-Length: " + body.length + "\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.UTF_8));
+            output.write(body);
+            output.flush();
+        } catch (java.io.IOException closed) {
+            // Tests close the listener and sockets during cleanup.
+        }
     }
 
     private static String roomResponse(String text) throws Exception {

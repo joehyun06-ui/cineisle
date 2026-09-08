@@ -2884,10 +2884,12 @@ public class MainActivity extends Activity {
 
         close.setOnClickListener(v -> d.dismiss());
 
-        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(dp(350), -2, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
-        pp.setMargins(0, 0, dp(12), 0);
-        panel.setVisibility(View.GONE);
-        root.addView(panel, pp);
+        ScrollView panelScroll = scroll(panel);
+        panelScroll.setFillViewport(false);
+        FrameLayout.LayoutParams pp = new FrameLayout.LayoutParams(dp(350), -1, Gravity.RIGHT | Gravity.CENTER_VERTICAL);
+        pp.setMargins(0, dp(8), dp(12), dp(8));
+        panelScroll.setVisibility(View.GONE);
+        root.addView(panelScroll, pp);
 
         final android.widget.TextView fullscreenChatToggle = new android.widget.TextView(this);
         fullscreenChatToggle.setText(">");
@@ -2912,13 +2914,13 @@ public class MainActivity extends Activity {
         fullscreenChatToggle.bringToFront();
 
         fullscreenChatToggle.setOnClickListener(v -> {
-            if (panel.getVisibility() == android.view.View.VISIBLE) {
-                panel.setVisibility(android.view.View.GONE);
+            if (panelScroll.getVisibility() == android.view.View.VISIBLE) {
+                panelScroll.setVisibility(android.view.View.GONE);
                 fullscreenChatToggle.setText(">");
             } else {
-                panel.setVisibility(android.view.View.VISIBLE);
+                panelScroll.setVisibility(android.view.View.VISIBLE);
                 fullscreenChatToggle.setText("<");
-                panel.bringToFront();
+                panelScroll.bringToFront();
                 fullscreenChatToggle.bringToFront();
             }
         });
